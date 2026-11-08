@@ -2,56 +2,12 @@ const SUPABASE_URL = "https://gvppxzokwqwjnkifrugm.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_OGG3jg1JT-IDIPgUxgFaJA_XMTWzADd";
 
 const escapeHtml = (value = "") =>
-  String(value).replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  })[char]);
+  String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
-const isSocialCrawler = (ua = "") =>
-  /facebookexternalhit|Facebot|WhatsApp|Twitterbot|LinkedInBot|TelegramBot|Discordbot|Slackbot|Pinterest|Google-InspectionTool|Googlebot|bingbot/i.test(ua);
-
-export default async (request) => {
-  const url = new URL(request.url);
-  const id = url.searchParams.get("id") || "";
-  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-    return new Response("Invalid article ID", { status: 400 });
-  }
-
-  const articleUrl = `${url.origin}/n/${encodeURIComponent(id)}`;
-  const userAgent = request.headers.get("user-agent") || "";
-
-  // Real visitors are sent to the existing single-page application.
-  if (!isSocialCrawler(userAgent)) {
-    return Response.redirect(`${url.origin}/#/n/${encodeURIComponent(id)}`, 302);
-  }
-
-  try {
-    const apiUrl = new URL(`${SUPABASE_URL}/rest/v1/news`);
-    apiUrl.searchParams.set("select", "id,title,summary,category,image_url,status");
-    apiUrl.searchParams.set("id", `eq.${id}`);
-    apiUrl.searchParams.set("status", "eq.published");
-    apiUrl.searchParams.set("limit", "1");
-
-    const result = await fetch(apiUrl, {
-      headers: {
-        apikey: SUPABASE_PUBLISHABLE_KEY,
-        Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
-        Accept: "application/json"
-      }
-    });
-
-    if (!result.ok) {
-      return new Response("Could not load article metadata", { status: 502 });
-    }
-
-    const rows = await result.json();
-    const article = rows?.[0];
-    if (!article) return new Response("Article not found", { status: 404 });
-
-    const title = article.title || "الجنوب+";
-    const description = article.summary || title;
-    const image = article.image_url || `${url.origin}/assets/social-reference.png`;
-
-    const html = `<!doctype html>
+const page = ({ origin, id, title, description, image, status = 200, cache }) => {
+  const articleUrl = id ? `${origin}/n/${encodeURIComponent(id)}` : origin;
+  const spaUrl = id ? `${origin}/#/n/${encodeURIComponent(id)}` : origin;
+  const html = `<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="utf-8">
@@ -67,28 +23,69 @@ export default async (request) => {
 <meta property="og:description" content="${escapeHtml(description)}">
 <meta property="og:image" content="${escapeHtml(image)}">
 <meta property="og:image:secure_url" content="${escapeHtml(image)}">
+<meta property="og:image:alt" content="${escapeHtml(title)}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="${escapeHtml(title)}">
 <meta name="twitter:description" content="${escapeHtml(description)}">
 <meta name="twitter:image" content="${escapeHtml(image)}">
+<script>location.replace(${JSON.stringify(spaUrl).replace(/</g, "\\u003c")});</script>
 </head>
 <body>
 <h1>${escapeHtml(title)}</h1>
 <p>${escapeHtml(description)}</p>
-<img src="${escapeHtml(image)}" alt="${escapeHtml(title)}">
-<p><a href="${escapeHtml(url.origin + "/#/n/" + encodeURIComponent(id))}">اقرأ الخبر على موقع الجنوب+</a></p>
+<p><a href="${escapeHtml(spaUrl)}">اقرأ الخبر على موقع الجنوب+</a></p>
 </body>
 </html>`;
+  return new Response(html, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": cache || "public, max-age=0, s-maxage=300",
+      "X-Content-Type-Options": "nosniff"
+    }
+  });
+};
 
-    return new Response(html, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "public, max-age=0, s-maxage=300",
-        "X-Content-Type-Options": "nosniff"
-      }
+export default async (request) => {
+  const url = new URL(request.url);
+  const origin = url.origin;
+  const fallbackImage = `${origin}/assets/social-reference.png`;
+
+  // The article id may arrive in the original path (/n/ID) or in the rewritten query (?id=ID).
+  // Anything after the first valid id (for example "%203" from a bad copy) is ignored.
+  const m = url.pathname.match(/^\/n\/([^/]+)/);
+  let raw = (m && m[1]) || url.searchParams.get("id") || "";
+  try { raw = decodeURIComponent(raw); } catch (e) {}
+  const id = (raw.trim().match(/^[A-Za-z0-9_-]+/) || [""])[0];
+
+  if (!id) return Response.redirect(origin, 302);
+
+  const generic = (status, cache) =>
+    page({ origin, id: "", title: "الجنوب+", description: "آخر أخبار الجنوب واليمن والعالم العربي والدولي", image: fallbackImage, status, cache: cache || "no-store" });
+
+  try {
+    const api = new URL(`${SUPABASE_URL}/rest/v1/news`);
+    api.searchParams.set("select", "id,title,summary,image_url");
+    api.searchParams.set("id", `eq.${id}`);
+    api.searchParams.set("status", "eq.published");
+    api.searchParams.set("limit", "1");
+
+    const res = await fetch(api, {
+      headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`, Accept: "application/json" }
     });
-  } catch (error) {
-    return new Response("Share preview temporarily unavailable", { status: 500 });
+    if (!res.ok) return generic(200);
+
+    const rows = await res.json();
+    const a = Array.isArray(rows) ? rows[0] : null;
+    if (!a) return generic(404);
+
+    const title = a.title || "الجنوب+";
+    const description = String(a.summary || title).slice(0, 200);
+    // Only a public https image can be a preview; old base64 images fall back to the site card.
+    const image = /^https:\/\//i.test(a.image_url || "") ? a.image_url : fallbackImage;
+
+    return page({ origin, id, title, description, image });
+  } catch (e) {
+    return generic(200);
   }
 };
