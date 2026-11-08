@@ -49,7 +49,7 @@ const page = ({ origin, id, title, description, image, status = 200, cache }) =>
 export default async (request) => {
   const url = new URL(request.url);
   const origin = url.origin;
-  const fallbackImage = `${origin}/assets/social-reference.png`;
+  const logoImage = `${origin}/assets/jnplus-logo.png`;
 
   // The article id may arrive in the original path (/n/ID) or in the rewritten query (?id=ID).
   // Anything after the first valid id (for example "%203" from a bad copy) is ignored.
@@ -61,28 +61,40 @@ export default async (request) => {
   if (!id) return Response.redirect(origin, 302);
 
   const generic = (status, cache) =>
-    page({ origin, id: "", title: "الجنوب+", description: "آخر أخبار الجنوب واليمن والعالم العربي والدولي", image: fallbackImage, status, cache: cache || "no-store" });
+    page({ origin, id: "", title: "الجنوب+", description: "آخر أخبار الجنوب واليمن والعالم العربي والدولي", image: logoImage, status, cache: cache || "no-store" });
 
-  try {
+  const getArticle = async () => {
     const api = new URL(`${SUPABASE_URL}/rest/v1/news`);
     api.searchParams.set("select", "id,title,summary,image_url");
     api.searchParams.set("id", `eq.${id}`);
     api.searchParams.set("status", "eq.published");
     api.searchParams.set("limit", "1");
-
     const res = await fetch(api, {
       headers: { apikey: SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${SUPABASE_PUBLISHABLE_KEY}`, Accept: "application/json" }
     });
-    if (!res.ok) return generic(200);
-
+    if (!res.ok) throw new Error("supabase " + res.status);
     const rows = await res.json();
-    const a = Array.isArray(rows) ? rows[0] : null;
+    return Array.isArray(rows) ? rows[0] || null : null;
+  };
+
+  try {
+    const a = await getArticle();
+
+    // ?img=1 -> the article's own cover as an image file (works for old base64 covers too)
+    if (url.searchParams.get("img") === "1") {
+      const src = (a && a.image_url) || "";
+      const d = src.match(/^data:(image\/(?:png|jpe?g|webp|gif));base64,(.+)$/);
+      if (d) return new Response(Buffer.from(d[2], "base64"), { status: 200, headers: { "Content-Type": d[1], "Cache-Control": "public, max-age=86400" } });
+      if (/^https:\/\//i.test(src)) return Response.redirect(src, 302);
+      return Response.redirect(logoImage, 302);
+    }
+
     if (!a) return generic(404);
 
     const title = a.title || "الجنوب+";
     const description = String(a.summary || title).slice(0, 200);
-    // Only a public https image can be a preview; old base64 images fall back to the site card.
-    const image = /^https:\/\//i.test(a.image_url || "") ? a.image_url : fallbackImage;
+    const src = a.image_url || "";
+    const image = /^https:\/\//i.test(src) ? src : /^data:image\//i.test(src) ? `${origin}/n/${encodeURIComponent(id)}?img=1` : logoImage;
 
     return page({ origin, id, title, description, image });
   } catch (e) {
